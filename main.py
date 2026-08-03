@@ -272,6 +272,12 @@ def execute():
         summary += f"\n当前步数比例: {time_rate:.0%} (北京时间 {current_hour:02d}:{current_minute:02d})"
         summary += f"\n本次步数范围: {min_step} ~ {max_step}"
 
+        # 附上实际提交的步数
+        if push_results:
+            actual = _extract_step_from_result(push_results[0])
+            if actual:
+                summary += f"\n实际提交步数: {actual}"
+
         next_info = predict_next_execution()
         if next_info:
             next_bj, next_min, next_max = next_info
