@@ -209,15 +209,39 @@ def run_single_account(total, idx, user_mi, passwd_mi):
     return exec_result
 
 
+def get_cron_hours() -> list:
+    """获取当前 cron 的 UTC 小时列表：
+    1. 优先读环境变量 CRON_HOURS（run.yml 传入）
+    2. 其次解析 .github/workflows/run.yml 中的实际 cron（cron.yml 每次会更新它）
+    3. 兜底默认值
+    """
+    env_hours = os.environ.get("CRON_HOURS", "")
+    if env_hours:
+        try:
+            hours = sorted({int(h.strip()) for h in env_hours.split(",") if h.strip()})
+            if hours:
+                return hours
+        except ValueError:
+            pass
+
+    try:
+        with open(".github/workflows/run.yml", 'r') as f:
+            for line in f:
+                m = re.search(r"cron: '(\d+)\s+([\d,]+)", line)
+                if m:
+                    hours = sorted({int(h) for h in m.group(2).split(",")})
+                    if hours:
+                        return hours
+                    break
+    except Exception:
+        pass
+
+    return [1, 4, 7, 10, 12, 14, 23]
+
+
 def predict_next_execution():
     """预测下一次执行时间（北京时间整点）和预期步数范围"""
-    cron_hours_env = os.environ.get("CRON_HOURS", "")
-    if not cron_hours_env:
-        cron_hours_env = "1,4,7,10,12,14,23"
-    try:
-        cron_utc = sorted([int(h.strip()) for h in cron_hours_env.split(",") if h.strip()])
-    except ValueError:
-        return None
+    cron_utc = get_cron_hours()
     if not cron_utc:
         return None
 
@@ -332,11 +356,7 @@ def _send_milestone_email(push_results: list, summary: str, push_config):
         actual_step = _extract_step_from_result(push_results[0])
 
     # 解析 CRON_HOURS
-    cron_str = os.environ.get("CRON_HOURS", "1,4,7,10,12,14,23")
-    try:
-        cron_utc = sorted([int(h.strip()) for h in cron_str.split(",") if h.strip()])
-    except ValueError:
-        return
+    cron_utc = get_cron_hours()
     if not cron_utc:
         return
 
@@ -345,6 +365,7 @@ def _send_milestone_email(push_results: list, summary: str, push_config):
     try:
         pos = cron_utc.index(current_utc)
     except ValueError:
+        print(f"当前 UTC 小时 {current_utc} 不在 cron 列表 {cron_utc} 中，不发送邮件")
         return
 
     first_pos = 0
