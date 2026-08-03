@@ -209,6 +209,34 @@ def run_single_account(total, idx, user_mi, passwd_mi):
     return exec_result
 
 
+def predict_next_execution():
+    """预测下一次执行时间（北京时间整点）和预期步数范围"""
+    cron_hours_env = os.environ.get("CRON_HOURS", "")
+    if not cron_hours_env:
+        cron_hours_env = "1,4,7,10,12,14,23"
+    try:
+        cron_utc = sorted([int(h.strip()) for h in cron_hours_env.split(",") if h.strip()])
+    except ValueError:
+        return None
+    if not cron_utc:
+        return None
+
+    now_utc = datetime.now(pytz.UTC)
+    current_utc_hour = now_utc.hour
+
+    next_utc = None
+    for h in cron_utc:
+        if h > current_utc_hour:
+            next_utc = h
+            break
+    if next_utc is None:
+        next_utc = cron_utc[0]
+
+    next_bj = (next_utc + 8) % 24
+    next_min, next_max = get_min_max_by_time(hour=next_bj, minute=0)
+    return next_bj, next_min, next_max
+
+
 def execute():
     user_list = users.split('#')
     passwd_list = passwords.split('#')
@@ -235,12 +263,110 @@ def execute():
             push_results.append(result)
             if result['success'] is True:
                 success_count += 1
+
+        current_hour = time_bj.hour
+        current_minute = time_bj.minute
+        time_rate = min((current_hour * 60 + current_minute) / (17 * 60), 1)
+
         summary = f"\n执行账号总数{total}，成功：{success_count}，失败：{total - success_count}"
+        summary += f"\n当前步数比例: {time_rate:.0%} (北京时间 {current_hour:02d}:{current_minute:02d})"
+        summary += f"\n本次步数范围: {min_step} ~ {max_step}"
+
+        next_info = predict_next_execution()
+        if next_info:
+            next_bj, next_min, next_max = next_info
+            summary += f"\n下次预计: 北京时间 {next_bj}:00 左右, 步数 {next_min} ~ {next_max}"
+
         print(summary)
         push_util.push_results(push_results, summary, push_config)
+
+        # ---- 邮件通知：按执行次序发送三封不同标题的邮件 ----
+        _send_milestone_email(push_results, summary, push_config)
     else:
         print(f"账号数长度[{len(user_list)}]和密码数长度[{len(passwd_list)}]不匹配，跳过执行")
         exit(1)
+
+
+def _extract_step_from_result(exec_result: dict) -> int | None:
+    """从 exec_result 的 msg 中提取实际步数，如 '修改步数（10852）[success]'"""
+    m = re.search(r'修改步数[（(](\d+)[）)]', exec_result.get('msg', ''))
+    return int(m.group(1)) if m else None
+
+
+def _load_email_state() -> dict:
+    """读取邮件发送状态（用于防止同一天重复发中间邮件）"""
+    path = ".email_state"
+    if os.path.exists(path):
+        try:
+            with open(path, 'r') as f:
+                return json.loads(f.read())
+        except Exception:
+            pass
+    return {}
+
+
+def _save_email_state(state: dict):
+    """持久化邮件发送状态，会被 run.yml 的 git add . 自动提交"""
+    with open(".email_state", 'w') as f:
+        json.dump(state, f)
+
+
+def _send_milestone_email(push_results: list, summary: str, push_config):
+    """三封里程碑邮件：
+    - 第一次执行（cron 首项）：健康心跳「运动开始啦！」
+    - 步数首次 >= 6666：提醒「已跑xxxx步，该抽音贝啦！」
+    - 最后一次执行（cron 末项）：总结「运动结束，今日共走：xxxx步」
+    """
+    if not push_config.email_host or not push_config.email_user:
+        return
+
+    # 从结果中取第一个账号的实际步数
+    actual_step = None
+    if push_results:
+        actual_step = _extract_step_from_result(push_results[0])
+
+    # 解析 CRON_HOURS
+    cron_str = os.environ.get("CRON_HOURS", "1,4,7,10,12,14,23")
+    try:
+        cron_utc = sorted([int(h.strip()) for h in cron_str.split(",") if h.strip()])
+    except ValueError:
+        return
+    if not cron_utc:
+        return
+
+    now_utc = datetime.now(pytz.UTC)
+    current_utc = now_utc.hour
+    try:
+        pos = cron_utc.index(current_utc)
+    except ValueError:
+        return
+
+    first_pos = 0
+    last_pos = len(cron_utc) - 1
+    today_str = get_beijing_time().strftime("%Y-%m-%d")
+
+    # 读取状态：今天是否已经发过中间邮件
+    state = _load_email_state()
+    mid_already_sent = state.get("mid_sent_date") == today_str
+
+    subject = None
+    if pos == first_pos:
+        # 每天第一次跑 → 健康心跳
+        subject = "运动开始啦！"
+    elif pos == last_pos:
+        # 每天最后一次跑 → 总结
+        step_str = str(actual_step) if actual_step else f"{min_step}~{max_step}"
+        subject = f"运动结束，今日共走：{step_str}步"
+    elif actual_step is not None and actual_step >= 6666 and not mid_already_sent:
+        # 步数首次达到 6666 → 提醒
+        subject = f"已跑{actual_step}步，该抽音贝啦！"
+        state["mid_sent_date"] = today_str
+        _save_email_state(state)
+
+    if subject:
+        push_util.send_email_report(push_config, subject, summary)
+    else:
+        print(f"当前 cron 位置 pos={pos}，不发送邮件（首封已发/中间已发/未到6666/不是末位）")
 
 
 def prepare_user_tokens() -> dict:
@@ -303,7 +429,12 @@ if __name__ == "__main__":
             push_plus_max=get_int_value_default(config, 'PUSH_PLUS_MAX', 30),
             push_wechat_webhook_key=config.get('PUSH_WECHAT_WEBHOOK_KEY'),
             telegram_bot_token=config.get('TELEGRAM_BOT_TOKEN'),
-            telegram_chat_id=config.get('TELEGRAM_CHAT_ID')
+            telegram_chat_id=config.get('TELEGRAM_CHAT_ID'),
+            email_host=config.get('EMAIL_HOST'),
+            email_port=config.get('EMAIL_PORT'),
+            email_user=config.get('EMAIL_USER'),
+            email_pass=config.get('EMAIL_PASS'),
+            email_to=config.get('EMAIL_TO'),
         )
         sleep_seconds = config.get('SLEEP_GAP')
         if sleep_seconds is None or sleep_seconds == '':

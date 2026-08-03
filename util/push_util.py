@@ -1,4 +1,6 @@
 import json
+import smtplib
+from email.mime.text import MIMEText
 
 import requests
 from datetime import datetime
@@ -25,13 +27,23 @@ class PushConfig:
                  push_plus_max=30,
                  push_wechat_webhook_key=None,
                  telegram_bot_token=None,
-                 telegram_chat_id=None):
+                 telegram_chat_id=None,
+                 email_host=None,
+                 email_port=None,
+                 email_user=None,
+                 email_pass=None,
+                 email_to=None):
         self.push_plus_token = push_plus_token
         self.push_plus_hour = push_plus_hour
         self.push_plus_max = int(push_plus_max) if push_plus_max else 30
         self.push_wechat_webhook_key = push_wechat_webhook_key
         self.telegram_bot_token = telegram_bot_token
         self.telegram_chat_id = telegram_chat_id
+        self.email_host = email_host
+        self.email_port = int(email_port) if email_port else 587
+        self.email_user = email_user
+        self.email_pass = email_pass
+        self.email_to = email_to if email_to else email_user
 
 
 def push_plus(token, title, content):
@@ -136,12 +148,28 @@ def push_telegram_bot(bot_token, chat_id, content):
 
 
 def push_results(exec_results, summary, config: PushConfig):
-    """推送所有结果"""
+    """推送所有结果（不含邮件，邮件由 main.py 按时机独立发送）"""
     if not_in_push_time_range(config):
         return
     push_to_push_plus(exec_results, summary, config)
     push_to_wechat_webhook(exec_results, summary, config)
     push_to_telegram_bot(exec_results, summary, config)
+
+
+def send_email_report(config: PushConfig, subject: str, body: str):
+    """独立邮件推送，不受 PUSH_PLUS_HOUR 限制"""
+    if not config.email_host or not config.email_user or not config.email_pass:
+        print("未配置邮件信息，跳过邮件推送")
+        return
+    push_email(
+        host=config.email_host,
+        port=config.email_port,
+        user=config.email_user,
+        password=config.email_pass,
+        to_addr=config.email_to,
+        subject=subject,
+        body=body,
+    )
 
 
 def not_in_push_time_range(config: PushConfig) -> bool:
@@ -239,3 +267,44 @@ def push_to_telegram_bot(exec_results, summary, config: PushConfig):
         push_telegram_bot(config.telegram_bot_token, config.telegram_chat_id, html)
     else:
         print("未配置 TELEGRAM_BOT_TOKEN 或 TELEGRAM_CHAT_ID 跳过telegram推送")
+
+
+def push_email(host, port, user, password, to_addr, subject, body):
+    """通过SMTP发送邮件"""
+    msg = MIMEText(body, 'plain', 'utf-8')
+    msg['Subject'] = subject
+    msg['From'] = user
+    msg['To'] = to_addr
+
+    try:
+        server = smtplib.SMTP(host, port, timeout=15)
+        server.starttls()
+        server.login(user, password)
+        server.sendmail(user, [to_addr], msg.as_string())
+        server.quit()
+        print(f"邮件推送完毕 -> {to_addr}")
+    except Exception as e:
+        print(f"邮件推送失败: {e}")
+
+
+def push_to_email(exec_results, summary, config: PushConfig):
+    """推送到邮箱"""
+    if not config.email_host or not config.email_user or not config.email_pass:
+        print("未配置邮件信息，跳过邮件推送")
+        return
+
+    body = summary
+    if len(exec_results) < config.push_plus_max:
+        for exec_result in exec_results:
+            status = "成功" if exec_result.get('success') else "失败"
+            body += f"\n  账号 {exec_result['user']}: {status} - {exec_result['msg']}"
+
+    push_email(
+        host=config.email_host,
+        port=config.email_port,
+        user=config.email_user,
+        password=config.email_pass,
+        to_addr=config.email_to,
+        subject=f"mimotion 步数报告 - {format_now()}",
+        body=body,
+    )
