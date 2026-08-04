@@ -368,23 +368,26 @@ def _send_milestone_email(push_results: list, summary: str, push_config):
         print(f"当前 UTC 小时 {current_utc} 不在 cron 列表 {cron_utc} 中，不发送邮件")
         return
 
-    first_pos = 0
     last_pos = len(cron_utc) - 1
     today_str = get_beijing_time().strftime("%Y-%m-%d")
 
-    # 读取状态：今天是否已经发过中间邮件
+    # 读取状态：今天已发过哪些里程碑邮件
     state = _load_email_state()
-    mid_already_sent = state.get("mid_sent_date") == today_str
+    start_sent = state.get("start_sent_date") == today_str
+    mid_sent = state.get("mid_sent_date") == today_str
 
     subject = None
-    if pos == first_pos:
-        # 每天第一次跑 → 健康心跳
+    if not start_sent:
+        # 今天第一次执行（无论哪个 cron 位置）→ 健康心跳
+        # 即使首班定时被 GitHub 跳过/延迟，也能确保收到心跳
         subject = "运动开始啦！"
+        state["start_sent_date"] = today_str
+        _save_email_state(state)
     elif pos == last_pos:
-        # 每天最后一次跑 → 总结
+        # 每天最后一次执行 → 总结
         step_str = str(actual_step) if actual_step else f"{min_step}~{max_step}"
         subject = f"运动结束，今日共走：{step_str}步"
-    elif actual_step is not None and actual_step >= 6666 and not mid_already_sent:
+    elif actual_step is not None and actual_step >= 6666 and not mid_sent:
         # 步数首次达到 6666 → 提醒
         subject = f"已跑{actual_step}步，该抽音贝啦！"
         state["mid_sent_date"] = today_str
@@ -393,7 +396,7 @@ def _send_milestone_email(push_results: list, summary: str, push_config):
     if subject:
         push_util.send_email_report(push_config, subject, summary)
     else:
-        print(f"当前 cron 位置 pos={pos}，不发送邮件（首封已发/中间已发/未到6666/不是末位）")
+        print(f"当前 cron 位置 pos={pos}，不发送邮件（今天已发首封/中间已发/未到6666/不是末位）")
 
 
 def prepare_user_tokens() -> dict:
